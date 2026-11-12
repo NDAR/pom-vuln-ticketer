@@ -1,0 +1,16 @@
+{
+  "version": "0",
+  "id": "01234567-EXAMPLE",
+  "detail-type": "CodePipeline Pipeline Execution State Change",
+  "source": "aws.codepipeline",
+  "account": "111111111111",
+  "time": "2026-11-11T10:00:00Z",
+  "region": "us-east-1",
+  "resources": ["arn:aws:codepipeline:us-east-1:111111111111:orders-pipeline"],
+  "detail": {
+    "pipeline": "orders-pipeline",
+    "execution-id": "exec-1",
+    "state": "SUCCEEDED",
+    "version": 3
+  }
+}
