@@ -120,3 +120,20 @@ def maven_files() -> dict[str, str]:
     for v in JACKSON_BOMS:
         files[f"com/fasterxml/jackson/jackson-bom/{v}/jackson-bom-{v}.pom"] = jackson_bom_pom(v)
     return files
+
+
+class FakeRepo:
+    """In-memory stand-in for MavenRepo, built on the real parsing code."""
+
+    def __new__(cls, files: dict[str, str] | None = None, down: bool = False):
+        from vuln_ticketer.maven_repo import MavenRepo, MavenRepoUnavailable
+
+        served = maven_files() if files is None else files
+
+        class _Repo(MavenRepo):
+            def _get(self, path: str):
+                if down:
+                    raise MavenRepoUnavailable("fake repository is down")
+                return served.get(path)
+
+        return _Repo()
