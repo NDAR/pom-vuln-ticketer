@@ -147,6 +147,49 @@ def test_plan_close():
     p = plan_ticket(EMPTY, render_description(make_report()), True)
     assert p.action == "close"
     assert p.comment == "All critical and high findings resolved as of abc123de (pipeline orders-pipeline)."
+    assert p.summary == "[orders-svc] Dependency vulnerabilities: resolved"
+    assert "All critical and high findings were resolved as of commit abc123de" in p.description
+    assert parse_finding_keys(p.description) == {"#resolved"}
+
+
+def test_plan_close_does_not_comment_twice():
+    # The ticket could not be transitioned last time and is still open: try the transition again, silently.
+    first = plan_ticket(EMPTY, render_description(make_report()), True)
+    again = plan_ticket(EMPTY, first.description, True)
+    assert (again.action, again.comment, again.description) == ("close", None, "")
+
+
+def test_findings_return_on_a_resolved_but_open_ticket():
+    resolved = plan_ticket(EMPTY, render_description(make_report()), True).description
+    p = plan_ticket(make_report(), resolved, True)
+    assert p.action == "update" and "0 resolved, 2 new, 0 unchanged" in p.comment
+
+
+def test_degraded_ticket_is_refreshed_by_a_healthy_run():
+    degraded = make_report([sug(verified=False)])
+    healthy = make_report([sug(verified=True)])
+    assert "#degraded" in parse_finding_keys(render_description(degraded))
+    assert "#degraded" not in parse_finding_keys(render_description(healthy))
+    p = plan_ticket(healthy, render_description(degraded), True)
+    assert p.action == "update"
+    assert p.comment == ("Deploy abc123de via orders-pipeline: 0 resolved, 0 new, 2 unchanged\n"
+                         "Suggestions regenerated: the previous ticket was produced without the Maven repository "
+                         "or the POM.")
+    assert plan_ticket(degraded, render_description(degraded), True).action == "none"
+
+
+def test_pom_missing_ticket_is_degraded():
+    assert "#degraded" in parse_finding_keys(render_description(make_report(pom_missing=True)))
+
+
+def test_no_fix_list_is_capped():
+    no_fix = [java_finding(("com.example.long.group.name", f"artifact-with-a-long-name-{i}"), "1.0.0", [], f"CVE-2024-{i:05d}")
+              for i in range(420)]
+    d = render_description(make_report(no_fix=no_fix))
+    assert len(d) <= MAX_DESCRIPTION
+    section = d.split("h2. No fix available yet")[1].split("{noformat")[0]
+    assert len([l for l in section.splitlines() if l.startswith("* ")]) == 50
+    assert "_370 more not shown; see AWS Inspector._" in section
 
 
 def test_plan_unchanged():
@@ -178,3 +221,8 @@ def test_plan_update_human_edited():
 
 def test_priority_high_only():
     assert plan_ticket(make_report([sug(cves=[("CVE-2", "HIGH")])]), None, False).priority_severity == "HIGH"
+
+
+def test_degraded_run_does_not_overwrite_a_healthy_ticket():
+    healthy = make_report([sug(verified=True)])
+    assert plan_ticket(make_report([sug(verified=False)]), render_description(healthy), True).action == "none"

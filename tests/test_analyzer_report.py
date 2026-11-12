@@ -97,3 +97,19 @@ def test_empty(dep, simple, repo):
 def test_finding_keys_sorted(dep, simple, repo):
     findings = [os_finding("openssl", "CVE-9"), f(GUAVA, "32.0.0-jre", ["32.0.1"], "CVE-1"), f(DATABIND, "2.15.3", [], "CVE-2")]
     assert analyze(dep, findings, simple, repo).finding_keys == sorted(x.key for x in findings)
+
+
+def test_one_failed_lookup_degrades_only_that_artifact(dep, simple):
+    repo = FakeRepo(fail_paths=("commons-text/maven-metadata.xml",))
+    r = analyze(dep, [f(("org.apache.commons", "commons-text"), "1.9", ["1.10.0"], "CVE-1"),
+                      f(GUAVA, "32.0.0-jre", ["32.0.1"], "CVE-2"),
+                      f(DATABIND, "2.15.3", ["2.15.4"], "CVE-3")], simple, repo)
+    by = {s.artifact: s for s in r.suggestions}
+    assert by["commons-text"].verified is False and by["commons-text"].kind == "property"
+    assert by["guava"].verified is True and by["jackson-databind"].kind == "boot"
+
+
+def test_project_boot_property_is_not_in_headline(dep, repo):
+    project = load_project(fixture_fetch("boot_prop_override.xml"))
+    r = analyze(dep, [f(DATABIND, "2.15.3", ["2.15.4"], "CVE-1"), f(SNAKEYAML, "2.2", ["2.3"], "CVE-2")], project, repo)
+    assert r.headline is None and {s.kind for s in r.suggestions} == {"property"}

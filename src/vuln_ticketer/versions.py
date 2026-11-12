@@ -76,6 +76,14 @@ def flavour(v: str) -> str | None:
     return None
 
 
+def flavour_family(v: str) -> str | None:
+    """Flavour without its build number or date: "redhat-1" -> "redhat", "v20230217" -> "v", "jre11" -> "jre11"."""
+    fl = flavour(v)
+    if fl is None:
+        return None
+    return re.sub(r"(?:[-._]\d+|\d{6,})$", "", fl).lower()
+
+
 def major(v: str) -> int:
     return minor_line(v)[0]
 

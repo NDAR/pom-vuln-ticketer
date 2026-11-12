@@ -9,6 +9,10 @@ from .models import Finding, Report, Suggestion, TicketPlan
 MAX_DESCRIPTION = 32767
 KEYS_HEADER = "pom-vuln-bot finding keys (do not edit)"
 MAX_KEYS_IN_COMMENT = 20
+MAX_NO_FIX_LINES = 50
+# Marker lines in the key block. They are not findings; they record the state the ticket was written in.
+DEGRADED = "#degraded"  # written without the Maven repository or without the POM
+RESOLVED = "#resolved"  # no findings left, but the ticket could not (yet) be transitioned
 _KEYS_BLOCK = re.compile(r"\{noformat:title=" + re.escape(KEYS_HEADER) + r"\}\n(.*?)\n?\{noformat\}", re.S)
 _KIND_LABELS = {
     "direct": "Direct dependency",
@@ -63,15 +67,27 @@ def _stored_keys(report: Report) -> list[str]:
     """The keys as written to the ticket: the full list, or one digest line when the list is too long."""
     keys = sorted(report.finding_keys)
     if len(_keys_block(keys)) > MAX_DESCRIPTION // 2:
-        return ["sha256:" + hashlib.sha256("\n".join(keys).encode()).hexdigest()]
+        keys = ["sha256:" + hashlib.sha256("\n".join(keys).encode()).hexdigest()]
+    if report.pom_missing or any(not s.verified for s in report.suggestions):
+        keys.append(DEGRADED)
     return keys
 
 
-def render_description(report: Report) -> str:
+def _context_lines(report: Report) -> list[str]:
     d = report.deployment
     images = ", ".join(f"{_esc(i.service)}: {_esc(i.ecr_repo)}@{i.digest[:19]}" for i in d.images)
-    head = [f"*Repository:* {_esc(d.repo)} | *Branch:* {_esc(d.branch)} | *Commit:* {d.commit[:8]} "
+    return [f"*Repository:* {_esc(d.repo)} | *Branch:* {_esc(d.branch)} | *Commit:* {d.commit[:8]} "
             f"| *Pipeline:* {_esc(d.pipeline)}", f"*Images:* {images}", ""]
+
+
+def _render_resolved(report: Report) -> str:
+    return "\n".join(_context_lines(report) + [
+        f"All critical and high findings were resolved as of commit {report.deployment.commit[:8]}.", "",
+        _keys_block([RESOLVED])])
+
+
+def render_description(report: Report) -> str:
+    head = _context_lines(report)
     if report.headline:
         head += ["{panel:title=Recommended}", _esc(report.headline), "{panel}", ""]
     if report.pom_missing:
@@ -81,7 +97,9 @@ def render_description(report: Report) -> str:
 
     tail: list[str] = []
     if report.no_fix:
-        tail += ["h2. No fix available yet", *[_finding_line(f) for f in report.no_fix], ""]
+        hidden = len(report.no_fix) - MAX_NO_FIX_LINES
+        tail += ["h2. No fix available yet", *[_finding_line(f) for f in report.no_fix[:MAX_NO_FIX_LINES]],
+                 *([f"_{hidden} more not shown; see AWS Inspector._"] if hidden > 0 else []), ""]
     if report.non_pom:
         critical = sum(1 for f in report.non_pom if f.severity == "CRITICAL")
         top = sorted(report.non_pom, key=lambda f: (f.severity != "CRITICAL", f.cve))[:5]
@@ -134,8 +152,12 @@ def plan_ticket(report: Report, existing_description: str | None, has_open_ticke
     if counts["total"] == 0:
         if not has_open_ticket:
             return TicketPlan("none")
-        return TicketPlan("close", comment=f"All critical and high findings resolved as of {d.commit[:8]} "
-                                           f"(pipeline {d.pipeline}).")
+        if parse_finding_keys(existing_description) == {RESOLVED}:
+            return TicketPlan("close")  # already recorded as resolved; only the transition is still outstanding
+        return TicketPlan("close", summary=f"[{d.repo}] Dependency vulnerabilities: resolved",
+                          description=_render_resolved(report),
+                          comment=f"All critical and high findings resolved as of {d.commit[:8]} "
+                                  f"(pipeline {d.pipeline}).")
 
     plan = TicketPlan("create", summary=summary_for(report), description=render_description(report),
                       priority_severity="CRITICAL" if counts["critical"] else "HIGH")
@@ -147,10 +169,15 @@ def plan_ticket(report: Report, existing_description: str | None, has_open_ticke
     if old is None:
         plan.action, plan.comment = "update", prefix + "previous ticket state could not be read; description regenerated."
         return plan
-    if old == new:
-        return TicketPlan("none")
-    added, resolved = sorted(new - old), sorted(old - new)
-    plan.action = "update"
-    plan.comment = "\n".join([prefix + f"{len(resolved)} resolved, {len(added)} new, {len(old & new)} unchanged",
-                              *_key_list("New", added), *_key_list("Resolved", resolved)])
+    old_keys, new_keys = ({k for k in keys if not k.startswith("#")} for keys in (old, new))
+    was_degraded, is_degraded = DEGRADED in old, DEGRADED in new
+    if old_keys == new_keys and (was_degraded == is_degraded or is_degraded) and RESOLVED not in old:
+        return TicketPlan("none")  # nothing changed, or this run is the worse-informed one: keep the ticket
+    added, resolved = sorted(new_keys - old_keys), sorted(old_keys - new_keys)
+    lines = [prefix + f"{len(resolved)} resolved, {len(added)} new, {len(old_keys & new_keys)} unchanged",
+             *_key_list("New", added), *_key_list("Resolved", resolved)]
+    if was_degraded and not is_degraded:
+        lines.append("Suggestions regenerated: the previous ticket was produced without the Maven repository "
+                     "or the POM.")
+    plan.action, plan.comment = "update", "\n".join(lines)
     return plan

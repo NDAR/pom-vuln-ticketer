@@ -104,3 +104,10 @@ def test_template_bucket_is_private_and_expires():
     bucket = template()["Resources"]["ReportBucket"]["Properties"]
     assert all(bucket["PublicAccessBlockConfiguration"].values())
     assert bucket["LifecycleConfiguration"]["Rules"][0]["ExpirationInDays"] == 30
+
+
+def test_scan_timeout_metric_has_an_alarm():
+    metric = workflow()["States"]["RecordScanTimeout"]["Parameters"]
+    alarm = template()["Resources"]["ScanTimeoutAlarm"]["Properties"]
+    assert (alarm["Namespace"], alarm["MetricName"]) == (metric["Namespace"], metric["MetricData"][0]["MetricName"])
+    assert "Dimensions" not in alarm and "Dimensions" not in metric["MetricData"][0]  # must match to alarm

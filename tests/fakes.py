@@ -62,6 +62,7 @@ def boot_pom(version: str) -> str:
   <properties>
     <jackson-bom.version>{jackson}</jackson-bom.version>
     <snakeyaml.version>{snake}</snakeyaml.version>
+    <netty.version>4.1.{version.replace('.', '')}</netty.version>
   </properties>
   <dependencyManagement>
     <dependencies>
@@ -74,6 +75,13 @@ def boot_pom(version: str) -> str:
         <groupId>com.fasterxml.jackson</groupId>
         <artifactId>jackson-bom</artifactId>
         <version>${{jackson-bom.version}}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>io.netty</groupId>
+        <artifactId>netty-bom</artifactId>
+        <version>${{netty.version}}</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>
@@ -125,18 +133,23 @@ def maven_files() -> dict[str, str]:
 class FakeRepo:
     """In-memory stand-in for MavenRepo, built on the real parsing code."""
 
-    def __new__(cls, files: dict[str, str] | None = None, down: bool = False):
+    def __new__(cls, files: dict[str, str] | None = None, down: bool = False, fail_paths: tuple = ()):
         from vuln_ticketer.maven_repo import MavenRepo, MavenRepoUnavailable
 
         served = maven_files() if files is None else files
 
         class _Repo(MavenRepo):
+            requested: list[str] = []
+
             def _get(self, path: str):
-                if down:
+                self.requested.append(path)
+                if down or any(f in path for f in fail_paths):
                     raise MavenRepoUnavailable("fake repository is down")
                 return served.get(path)
 
-        return _Repo()
+        repo = _Repo()
+        repo.requested = []
+        return repo
 
 
 # --- Model builders ------------------------------------------------------------

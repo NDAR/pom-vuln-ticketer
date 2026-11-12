@@ -17,9 +17,10 @@ def world(monkeypatch):
     clients = {"ssm": FakeSsm(CONFIG), "codecommit": FakeCodeCommit({"pom.xml": read("simple.xml")})}
     for name in ("codepipeline", "ecs", "ecr", "codedeploy", "inspector2"):
         clients[name] = object()
+    clients["sts"] = type("Sts", (), {"get_caller_identity": lambda self: {"Account": "111111111111"}})()
     monkeypatch.setattr(handlers, "_CLIENTS", clients)
     monkeypatch.setattr(handlers, "MavenRepo", lambda url: FakeRepo())
-    monkeypatch.setattr(handlers.deployment, "resolve", lambda *a: make_deployment())
+    monkeypatch.setattr(handlers.deployment, "resolve", lambda *a, **k: make_deployment())
     monkeypatch.setattr(handlers.inspector, "scan_ready", lambda client, images: True)
     monkeypatch.setattr(handlers.inspector, "list_findings",
                         lambda client, images: [java_finding(GUAVA, "32.0.0-jre", ["32.0.1"], "CVE-2", "CRITICAL")])
@@ -41,7 +42,7 @@ def test_dry_run_prints_ticket(world, capsys):
 
 def test_dry_run_passes_pipeline_and_execution(world, monkeypatch):
     seen = {}
-    monkeypatch.setattr(handlers.deployment, "resolve", lambda detail, *a: seen.update(detail) or make_deployment())
+    monkeypatch.setattr(handlers.deployment, "resolve", lambda detail, *a, **k: seen.update(detail) or make_deployment())
     replay.main(["orders-pipeline", "exec-1", "--dry-run"])
     assert seen == {"pipeline": "orders-pipeline", "execution-id": "exec-1"}
 
@@ -64,7 +65,7 @@ def test_dry_run_works_without_ssm_config(world, monkeypatch, capsys):
 
 
 def test_not_handled_exit_2(world, monkeypatch):
-    monkeypatch.setattr(handlers.deployment, "resolve", lambda *a: None)
+    monkeypatch.setattr(handlers.deployment, "resolve", lambda *a, **k: None)
     assert replay.main(["orders-pipeline", "exec-1", "--dry-run"]) == 2
 
 

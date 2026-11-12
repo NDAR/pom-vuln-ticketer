@@ -55,7 +55,8 @@ def main(argv: list[str]) -> int:
     dep = handlers.deployment.resolve(
         {"pipeline": args.pipeline, "execution-id": args.execution_id},
         handlers._client("codepipeline"), handlers._client("ecs"), handlers._client("ecr"),
-        handlers._client("codedeploy"), set())
+        handlers._client("codedeploy"), set(),
+        account_id=handlers._client("sts").get_caller_identity()["Account"])
     if dep is None:
         print("Pipeline execution not handled: it needs a CodeCommit source, an ECS deploy action and an ECR image.",
               file=sys.stderr)

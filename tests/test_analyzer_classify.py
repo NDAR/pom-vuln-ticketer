@@ -1,5 +1,5 @@
 import pytest
-from fakes import FakeRepo, fixture_fetch, fixture_fetch_dir
+from fakes import FakeRepo, fixture_fetch, fixture_fetch_dir, read
 
 from vuln_ticketer.analyzer import classify, select_target
 from vuln_ticketer.maven_repo import BootBom
@@ -108,3 +108,55 @@ def test_group_adopted_from_boot_bom(simple, bom):
 def test_group_unknown(simple, bom):
     s = classify(None, "mystery", "1", "2", simple, bom)
     assert s.kind == "pin" and "<groupId>UNKNOWN</groupId>" in s.snippet and "group" in s.note
+
+
+# --- Review fixes: never suggest a change that downgrades or fixes nothing ---
+
+@pytest.mark.parametrize("installed,fixed,published,exp", [
+    ("2.1.0.redhat-1", ["2.1.1"], ["2.1.0.redhat-1", "2.1.1", "2.1.1.redhat-2"], ("2.1.1.redhat-2", True)),
+    ("9.4.51.v20230217", ["9.4.52"], ["9.4.51.v20230217", "9.4.52.v20230823"], ("9.4.52.v20230823", True)),
+    ("12.4.1.jre11", ["12.4.2"], ["12.4.2.jre8", "12.4.2.jre11"], ("12.4.2.jre11", True)),
+])
+def test_select_target_flavour_family(installed, fixed, published, exp):
+    assert select_target(installed, fixed, published) == exp
+
+
+def test_declared_literal_already_fixed_is_not_touched(simple, bom):
+    # POM declares guava 32.0.0-jre; the vulnerable 31.0-jre jar comes from somewhere else.
+    s = classify("com.google.guava", "guava", "31.0-jre", "32.0.0-jre", simple, bom)
+    assert s.kind == "pin" and "already" in s.note and "32.0.0-jre" in s.note
+
+
+def test_declared_property_already_fixed_is_not_downgraded(simple, bom):
+    s = classify("org.apache.commons", "commons-text", "1.8", "1.9", simple, bom)
+    assert s.kind == "pin" and "already" in s.note and "<commons-text.version>" not in s.snippet
+
+
+def test_project_managed_already_fixed_is_not_touched(simple, bom):
+    assert classify("org.yaml", "snakeyaml", "1.30", "1.33", simple, bom).kind == "pin"
+
+
+def test_project_overrides_boot_property(bom):
+    project = load_project(fixture_fetch("boot_prop_override.xml"))
+    s = classify("org.yaml", "snakeyaml", "2.2", "2.3", project, bom)
+    assert (s.kind, s.section, s.pom_file) == ("property", "properties", "pom.xml")
+    assert s.snippet == "<snakeyaml.version>2.3</snakeyaml.version>" and s.boot_upgrade is None
+
+
+def test_project_overrides_boot_bom_property(bom):
+    project = load_project(fixture_fetch("boot_prop_override.xml"))
+    s = classify("com.fasterxml.jackson.core", "jackson-databind", "2.15.3", "2.15.4", project, bom)
+    assert s.kind == "property" and s.snippet == "<jackson-bom.version>2.15.4</jackson-bom.version>"
+
+
+def test_project_boot_property_already_fixed(bom):
+    project = load_project(fixture_fetch("boot_prop_override.xml"))
+    s = classify("org.yaml", "snakeyaml", "1.33", "2.2", project, bom)
+    assert s.kind == "pin" and "already" in s.note
+
+
+def test_boot_already_manages_fix(bom):
+    project = load_project(lambda p: read("simple.xml").replace("<version>3.2.1</version>", "<version>3.2.5</version>")
+                           if p == "pom.xml" else None)
+    s = classify("com.fasterxml.jackson.core", "jackson-databind", "2.15.2", "2.15.4", project, bom)
+    assert s.kind == "pin" and s.boot_upgrade is None and "already" in s.note

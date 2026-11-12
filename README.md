@@ -117,7 +117,16 @@ token in the `JIRA_TOKEN` environment variable.
   `AlarmTopicArn` if set). Open the execution in Step Functions to see which
   step failed.
 - **Scan not finished in time:** the run ends successfully at `ScanTimeout`
-  without touching JIRA and records the `PomVulnTicketer/ScanTimeout` metric.
+  without touching JIRA, records the `PomVulnTicketer/ScanTimeout` metric and
+  raises `ScanTimeoutAlarm`. If this happens on every deploy, look for
+  `image scan not ready` in the CheckScan function's log: it shows the scan
+  status Inspector reported.
+- **Java findings listed under "Not fixable in the POM":** look for
+  `inspector findings read` in the Analyze function's log. It lists the
+  package managers Inspector reported; any Java one missing from
+  `JAVA_MANAGERS` in `src/vuln_ticketer/inspector.py` needs adding.
+- **Images in another account's ECR** (shared sidecars, for example) are
+  ignored.
 - **Skipped runs** (pipeline not in the allow-list, no CodeCommit source, no
   ECS deploy, or no JIRA project for the repo) end at `Skipped`; the reason is
   in the Resolve step's output.

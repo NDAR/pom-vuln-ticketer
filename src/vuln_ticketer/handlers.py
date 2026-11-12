@@ -31,8 +31,9 @@ def resolve_handler(event, ctx):
     settings = Settings.from_env()
     detail = event["detail"]
     extra = {"executionId": detail.get("execution-id"), "pipeline": detail.get("pipeline")}
+    arn = getattr(ctx, "invoked_function_arn", None)
     dep = deployment.resolve(detail, _client("codepipeline"), _client("ecs"), _client("ecr"), _client("codedeploy"),
-                             settings.pipeline_allow_list)
+                             settings.pipeline_allow_list, account_id=arn.split(":")[4] if arn else None)
     if dep is None:
         log.info("skipped: pipeline not handled", extra=extra)
         return {"status": "SKIPPED", "reason": "pipeline not handled"}
@@ -91,12 +92,14 @@ def publish(plan: TicketPlan, existing: dict | None, client: JiraClient, cfg: Co
     priority = cfg.priority_map.get(plan.priority_severity) if plan.priority_severity else None
     if plan.action == "create":
         return client.create_issue(project, cfg.issue_type, plan.summary, plan.description, priority, repo)
-    if plan.action == "update":
-        client.update_issue(key, plan.summary, plan.description, priority)
+    # Comment before description: the description records the new state, so if a step fails in between and is
+    # retried, the comment is written again rather than lost.
+    if plan.action in ("update", "close"):
         if plan.comment:
             client.add_comment(key, plan.comment)
-    elif plan.action == "close":
-        client.add_comment(key, plan.comment or "")
+        if plan.description:
+            client.update_issue(key, plan.summary, plan.description, priority)
+    if plan.action == "close":
         if not client.transition(key, cfg.done_transition):
             log.warning("transition not available; ticket left open", extra={"issueKey": key,
                                                                              "transition": cfg.done_transition})

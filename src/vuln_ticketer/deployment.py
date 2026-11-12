@@ -42,6 +42,22 @@ def _ecs_services(actions: list[dict], codedeploy) -> list[tuple[str, str]]:
     return services
 
 
+def _codecommit_source(actions: list[dict]) -> dict | None:
+    """The CodeCommit source action; with several, the one whose artifact the build treats as primary."""
+    sources = [a for a in actions if a["input"]["actionTypeId"]["category"] == "Source"
+               and a["input"]["actionTypeId"]["provider"] == "CodeCommit"]
+    if len(sources) < 2:
+        return sources[0] if sources else None
+    build = next((a for a in actions if a["input"]["actionTypeId"]["category"] == "Build"), None)
+    if build:
+        inputs = [i["name"] for i in build["input"].get("inputArtifacts", [])]
+        primary = build["input"].get("configuration", {}).get("PrimarySource") or (inputs[0] if inputs else None)
+        for source in sources:
+            if primary in [o["name"] for o in source.get("output", {}).get("outputArtifacts", [])]:
+                return source
+    return sources[0]
+
+
 def _digest(ecr, account: str, repo: str, tag: str | None) -> str | None:
     try:
         resp = ecr.describe_images(registryId=account, repositoryName=repo, imageIds=[{"imageTag": tag or "latest"}])
@@ -53,15 +69,18 @@ def _digest(ecr, account: str, repo: str, tag: str | None) -> str | None:
     return details[0]["imageDigest"] if details else None
 
 
-def resolve(detail: dict, codepipeline, ecs, ecr, codedeploy, allow_list: set[str]) -> Deployment | None:
-    """None when the pipeline is not one this tool handles (not allowed, not CodeCommit, not ECS)."""
+def resolve(detail: dict, codepipeline, ecs, ecr, codedeploy, allow_list: set[str],
+            account_id: str | None = None) -> Deployment | None:
+    """None when the pipeline is not one this tool handles (not allowed, not CodeCommit, not ECS).
+
+    With account_id set, images in another account's ECR are ignored: Inspector here does not scan them.
+    """
     pipeline, execution_id = detail["pipeline"], detail["execution-id"]
     if allow_list and pipeline not in allow_list:
         return None
 
     actions = _action_executions(codepipeline, pipeline, execution_id)
-    source = next((a for a in actions if a["input"]["actionTypeId"]["category"] == "Source"
-                   and a["input"]["actionTypeId"]["provider"] == "CodeCommit"), None)
+    source = _codecommit_source(actions)
     if source is None:
         return None
     services = _ecs_services(actions, codedeploy)
@@ -85,7 +104,7 @@ def resolve(detail: dict, codepipeline, ecs, ecr, codedeploy, allow_list: set[st
         task_def = ecs.describe_task_definition(taskDefinition=described[0]["taskDefinition"])["taskDefinition"]
         for container in task_def.get("containerDefinitions", []):
             m = _ECR_URI.match(container.get("image", ""))
-            if not m:
+            if not m or (account_id and m["account"] != account_id):
                 continue
             digest = m["digest"] or _digest(ecr, m["account"], m["repo"], m["tag"])
             if digest:

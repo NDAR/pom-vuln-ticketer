@@ -166,3 +166,50 @@ def test_commit_fallback(aws):
     aws.service([URI])
     aws.digest()
     assert aws.resolve().commit == "fedcba987"
+
+
+def test_image_from_another_account_is_skipped(aws):
+    aws.actions(SOURCE, DEPLOY)
+    aws.service(["222222222222.dkr.ecr.eu-west-1.amazonaws.com/shared/sidecar:1", URI])
+    aws.digest()  # only our own image is looked up in ECR
+    out = resolve(DETAIL, aws.cp, aws.ecs, aws.ecr, aws.cd, set(), account_id="111111111111")
+    for s in aws.stubs.values():
+        s.assert_no_pending_responses()
+    assert [i.ecr_repo for i in out.images] == ["orders-svc"]
+
+
+def test_digest_pinned_image_from_another_account_is_skipped(aws):
+    aws.actions(SOURCE, DEPLOY)
+    aws.service(["222222222222.dkr.ecr.eu-west-1.amazonaws.com/shared/sidecar@sha256:ccc"])
+    assert resolve(DETAIL, aws.cp, aws.ecs, aws.ecr, aws.cd, set(), account_id="111111111111") is None
+
+
+def _with_artifacts(act, inputs=(), outputs=()):
+    act = json.loads(json.dumps(act))
+    act["input"]["inputArtifacts"] = [{"name": n} for n in inputs]
+    act["output"]["outputArtifacts"] = [{"name": n} for n in outputs]
+    return act
+
+
+def test_two_codecommit_sources_uses_the_one_that_is_built(aws):
+    config_src = _with_artifacts(action("Source", "CodeCommit", {"RepositoryName": "deploy-config", "BranchName": "main"},
+                                        {"CommitId": "cfg111"}), outputs=["ConfigArtifact"])
+    app_src = _with_artifacts(SOURCE, outputs=["AppArtifact"])
+    build = _with_artifacts(BUILD, inputs=["AppArtifact", "ConfigArtifact"])
+    aws.actions(config_src, app_src, build, DEPLOY)
+    aws.service([URI])
+    aws.digest()
+    d = aws.resolve()
+    assert (d.repo, d.commit) == ("orders-svc", "abc123def")
+
+
+def test_two_codecommit_sources_respects_codebuild_primary_source(aws):
+    config_src = _with_artifacts(action("Source", "CodeCommit", {"RepositoryName": "deploy-config", "BranchName": "main"},
+                                        {"CommitId": "cfg111"}), outputs=["ConfigArtifact"])
+    app_src = _with_artifacts(SOURCE, outputs=["AppArtifact"])
+    build = _with_artifacts(action("Build", "CodeBuild", {"ProjectName": "b", "PrimarySource": "AppArtifact"}),
+                            inputs=["ConfigArtifact", "AppArtifact"])
+    aws.actions(config_src, app_src, build, DEPLOY)
+    aws.service([URI])
+    aws.digest()
+    assert aws.resolve().repo == "orders-svc"

@@ -1,3 +1,5 @@
+import re
+
 import pytest
 import requests
 import responses
@@ -13,6 +15,7 @@ def repo():
     with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
         for path, body in maven_files().items():
             rsps.add(responses.GET, f"{BASE}/{path}", body=body)
+        rsps.add(responses.GET, re.compile(f"{BASE}/io/netty/netty-bom/.*"), status=404)
         rsps.add(responses.GET, f"{BASE}/org/x/y/maven-metadata.xml", status=503)
         rsps.add(responses.GET, f"{BASE}/org/x/z/maven-metadata.xml", body=requests.ConnectionError("boom"))
         r = MavenRepo()
@@ -93,3 +96,35 @@ def test_override_nested_bom_none_available(repo):
 
 def test_override_without_property(repo):
     assert BootBom(repo).override_value(ManagedEntry("1.0", None, None), "g", "a", "1.1") is None
+
+
+def test_transient_failure_is_retried():
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, f"{BASE}/org/a/b/maven-metadata.xml", status=503)
+        rsps.add(responses.GET, f"{BASE}/org/a/b/maven-metadata.xml",
+                 body="<metadata><versioning><versions><version>1</version></versions></versioning></metadata>")
+        assert MavenRepo().versions("org.a", "b") == ["1"]
+
+
+def test_stops_calling_a_repository_that_keeps_failing():
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        rsps.add(responses.GET, re.compile(f"{BASE}/.*"), status=503)
+        r = MavenRepo()
+        for artifact in "abcde":
+            with pytest.raises(MavenRepoUnavailable):
+                r.versions("org.x", artifact)
+        assert len(rsps.calls) == 6  # three lookups tried twice each, then the circuit opens
+
+
+def test_boot_search_fetches_only_the_relevant_nested_bom():
+    from fakes import FakeRepo
+
+    repo = FakeRepo()
+    bom = BootBom(repo)
+    bom.managed("3.2.1")
+    repo.requested.clear()
+    assert bom.lowest_boot_managing(*DATABIND, "2.16.0", "3.2.1") == "3.3.0"
+    assert not [p for p in repo.requested if "netty-bom" in p]
+    repo.requested.clear()
+    assert bom.lowest_boot_managing(*SNAKEYAML, "2.3", "3.2.1") == "3.2.5"
+    assert not [p for p in repo.requested if "-bom/" in p]  # direct entry: no nested BOM needed at all

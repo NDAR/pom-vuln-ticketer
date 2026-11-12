@@ -213,6 +213,20 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
 
+  ScanTimeoutAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: pom-vuln-ticketer gave up waiting for an Inspector scan, so no ticket was written for that deployment
+      Namespace: PomVulnTicketer
+      MetricName: ScanTimeout
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+
 Outputs:
   StateMachineArn:
     Value: !Ref Workflow

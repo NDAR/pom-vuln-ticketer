@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import re
 
+from .log import get_logger
 from .models import Finding, Image
+
+log = get_logger("inspector")
 
 JAVA_MANAGERS = {"JAR", "POM", "GRADLE", "POMPROPERTIES"}
 SEVERITIES = ("CRITICAL", "HIGH")  # the only findings this tool handles
@@ -30,10 +33,11 @@ def scan_ready(client, images: list[Image]) -> bool:
     for image in images:
         records = _pages(client.list_coverage, "coveredResources",
                          filterCriteria={"ecrRepositoryName": [_eq(image.ecr_repo)]})
-        if not any(r.get("resourceId", "").endswith(image.digest)
-                   and r.get("scanStatus", {}).get("statusCode") == "ACTIVE"
-                   and r.get("scanStatus", {}).get("reason") == "SUCCESSFUL"
-                   for r in records):
+        status = next((r.get("scanStatus", {}) for r in records if r.get("resourceId", "").endswith(image.digest)), None)
+        if not status or status.get("statusCode") != "ACTIVE" or status.get("reason") != "SUCCESSFUL":
+            # Logged so that an unexpected status (one that never becomes ready) is visible to operators.
+            log.info("image scan not ready", extra={"ecrRepo": image.ecr_repo, "digest": image.digest,
+                                                     "scanStatus": status})
             return False
     return True
 
@@ -58,6 +62,7 @@ def _fixed_versions(raw: str | None) -> list[str]:
 def list_findings(client, images: list[Image]) -> list[Finding]:
     """Active CRITICAL/HIGH package vulnerabilities on the images, one per vulnerable package."""
     merged: dict[str, Finding] = {}
+    managers: dict[str, int] = {}
     for image in images:
         criteria = {
             "ecrImageHash": [_eq(image.digest)],
@@ -68,7 +73,9 @@ def list_findings(client, images: list[Image]) -> list[Finding]:
         for raw in _pages(client.list_findings, "findings", filterCriteria=criteria):
             details = raw.get("packageVulnerabilityDetails", {})
             for pkg in details.get("vulnerablePackages", []):
-                is_java = pkg.get("packageManager") in JAVA_MANAGERS
+                manager = pkg.get("packageManager", "UNKNOWN")
+                managers[manager] = managers.get(manager, 0) + 1
+                is_java = manager in JAVA_MANAGERS
                 file_path = pkg.get("filePath", "")
                 group, artifact = _coordinates(pkg.get("name", ""), file_path, is_java)
                 finding = Finding(
@@ -82,4 +89,6 @@ def list_findings(client, images: list[Image]) -> list[Finding]:
                     existing.services = sorted(set(existing.services) | {image.service})
                 else:
                     merged[finding.key] = finding
+    # Logged so that a Java package manager this tool does not recognise is visible to operators.
+    log.info("inspector findings read", extra={"findings": len(merged), "packageManagers": managers})
     return list(merged.values())

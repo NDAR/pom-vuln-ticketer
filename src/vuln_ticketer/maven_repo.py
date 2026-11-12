@@ -7,11 +7,13 @@ from dataclasses import dataclass
 import requests
 
 from . import versions as V
-from .pom import BOOT_BOM, BOOT_GROUP, PomError, parse_pom
+from .pom import BOOT_BOM, BOOT_GROUP, Pom, PomError, parse_pom
 
 DEFAULT_BASE_URL = "https://repo1.maven.org/maven2"
 MAX_BOOT_FETCHES = 25
 MAX_BOM_CHECKS = 3
+ATTEMPTS_PER_REQUEST = 2
+MAX_CONSECUTIVE_FAILURES = 3  # after this many failed lookups in a row the repository is treated as down
 
 
 class MavenRepoUnavailable(Exception):
@@ -24,19 +26,34 @@ class MavenRepo:
         self.session = session or requests.Session()
         self.timeout = timeout
         self._cache: dict[str, str | None] = {}
+        self._failures = 0
 
-    def _get(self, path: str) -> str | None:
-        if path not in self._cache:
+    def _fetch(self, path: str) -> str | None:
+        error = ""
+        for _ in range(ATTEMPTS_PER_REQUEST):
             try:
                 resp = self.session.get(f"{self.base_url}/{path}", timeout=self.timeout)
             except requests.RequestException as e:
-                raise MavenRepoUnavailable(str(e)) from e
+                error = str(e)
+                continue
             if resp.status_code == 404:
-                self._cache[path] = None
-            elif resp.status_code >= 400:
-                raise MavenRepoUnavailable(f"{resp.status_code} for {path}")
-            else:
-                self._cache[path] = resp.text
+                return None
+            if resp.status_code >= 400:
+                error = f"{resp.status_code} for {path}"
+                continue
+            return resp.text
+        raise MavenRepoUnavailable(error)
+
+    def _get(self, path: str) -> str | None:
+        if path not in self._cache:
+            if self._failures >= MAX_CONSECUTIVE_FAILURES:
+                raise MavenRepoUnavailable("repository marked unavailable after repeated failures")
+            try:
+                self._cache[path] = self._fetch(path)
+            except MavenRepoUnavailable:
+                self._failures += 1
+                raise
+            self._failures = 0
         return self._cache[path]
 
     def versions(self, group: str, artifact: str) -> list[str]:
@@ -67,6 +84,16 @@ class BootBom:
         self.repo = repo
         self._managed: dict[str, dict[tuple[str, str], ManagedEntry]] = {}
         self._boms: dict[tuple[str, str, str], dict[tuple[str, str], str]] = {}
+        self._boot_poms: dict[str, Pom | None] = {}
+
+    def _boot_pom(self, boot_version: str) -> Pom | None:
+        if boot_version not in self._boot_poms:
+            text = self.repo.fetch_pom(BOOT_GROUP, BOOT_BOM, boot_version)
+            try:
+                self._boot_poms[boot_version] = parse_pom(text, f"{BOOT_BOM}-{boot_version}.pom") if text else None
+            except PomError:
+                self._boot_poms[boot_version] = None
+        return self._boot_poms[boot_version]
 
     def _bom_entries(self, group: str, artifact: str, version: str, depth: int = 1) -> dict[tuple[str, str], str]:
         """(group, artifact) -> version managed by a BOM, following its own imports one level."""
@@ -94,11 +121,7 @@ class BootBom:
         if boot_version not in self._managed:
             direct: dict[tuple[str, str], ManagedEntry] = {}
             nested: dict[tuple[str, str], ManagedEntry] = {}
-            text = self.repo.fetch_pom(BOOT_GROUP, BOOT_BOM, boot_version)
-            try:
-                pom = parse_pom(text, f"{BOOT_BOM}-{boot_version}.pom") if text else None
-            except PomError:
-                pom = None
+            pom = self._boot_pom(boot_version)
             for dep in pom.managed if pom else []:
                 if dep.version is None:
                     continue
@@ -110,15 +133,29 @@ class BootBom:
             self._managed[boot_version] = {**nested, **direct}
         return self._managed[boot_version]
 
+    def _managed_version(self, boot_version: str, group: str, artifact: str, via: ManagedEntry) -> str | None:
+        """Version of one artifact in a Boot release, fetching only the nested BOM that supplies it."""
+        pom = self._boot_pom(boot_version)
+        for dep in pom.managed if pom else []:
+            if dep.scope != "import" and (dep.group, dep.artifact) == (group, artifact):
+                return dep.version
+        for dep in pom.managed if pom and via.bom else []:
+            if dep.scope == "import" and (dep.group, dep.artifact) == via.bom and dep.version:
+                return self._bom_entries(dep.group, dep.artifact, dep.version).get((group, artifact))
+        return None
+
     def lowest_boot_managing(self, group: str, artifact: str, target: str, current_boot: str) -> str | None:
         """Lowest Boot release above current_boot, same major, that manages artifact at >= target."""
+        via = self.managed(current_boot).get((group, artifact))
+        if via is None:
+            return None
         newer = [v for v in self.repo.versions(BOOT_GROUP, BOOT_BOM)
                  if V.compare(v, current_boot) > 0 and V.major(v) == V.major(current_boot)]
         line = V.minor_line(current_boot)
         candidates = [v for v in newer if V.minor_line(v) == line] + [v for v in newer if V.minor_line(v) != line]
         for boot_version in candidates[:MAX_BOOT_FETCHES]:
-            entry = self.managed(boot_version).get((group, artifact))
-            if entry and V.compare(entry.version, target) >= 0:
+            version = self._managed_version(boot_version, group, artifact, via)
+            if version and V.compare(version, target) >= 0:
                 return boot_version
         return None
 

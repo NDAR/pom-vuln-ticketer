@@ -137,3 +137,18 @@ def test_merge_across_images(client):
     client.stub.add_response("list_findings", {"findings": [finding("inspector_finding_java.json")]}, other_filter)
     found = list_findings(client, [IMG, other])
     assert len(found) == 1 and found[0].services == ["billing", "orders"]
+
+
+def test_logs_scan_status_when_not_ready(client, capsys):
+    client.stub.add_response("list_coverage", {"coveredResources": [coverage("PENDING_INITIAL_SCAN")]}, COVERAGE_FILTER)
+    scan_ready(client, [IMG])
+    rec = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert rec["message"] == "image scan not ready" and rec["scanStatus"] == {"statusCode": "ACTIVE", "reason": "PENDING_INITIAL_SCAN"}
+
+
+def test_logs_package_managers_seen(client, capsys):
+    client.stub.add_response("list_findings", {"findings": [finding("inspector_finding_java.json"),
+                                                            finding("inspector_finding_os.json")]}, FINDINGS_FILTER)
+    list_findings(client, [IMG])
+    rec = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert rec["message"] == "inspector findings read" and rec["packageManagers"] == {"JAR": 1, "OS": 1}

@@ -89,27 +89,30 @@ def env(monkeypatch):
 
 
 def test_resolve_skipped_pipeline(env, monkeypatch):
-    monkeypatch.setattr(handlers.deployment, "resolve", lambda *a: None)
+    monkeypatch.setattr(handlers.deployment, "resolve", lambda *a, **k: None)
     assert handlers.resolve_handler(EVENT, None) == {"status": "SKIPPED", "reason": "pipeline not handled"}
 
 
 def test_resolve_skipped_no_project(env, monkeypatch):
     env["ssm"].config = {"repos": {}}
-    monkeypatch.setattr(handlers.deployment, "resolve", lambda *a: make_deployment())
+    monkeypatch.setattr(handlers.deployment, "resolve", lambda *a, **k: make_deployment())
     assert handlers.resolve_handler(EVENT, None) == {"status": "SKIPPED", "reason": "no JIRA project for repo"}
 
 
 def test_resolve_ok(env, monkeypatch):
     seen = {}
 
-    def fake_resolve(detail, cp, ecs, ecr, cd, allow):
-        seen.update(detail=detail, allow=allow)
+    def fake_resolve(detail, cp, ecs, ecr, cd, allow, account_id=None):
+        seen.update(detail=detail, allow=allow, account_id=account_id)
         return make_deployment()
 
+    class Ctx:
+        invoked_function_arn = "arn:aws:lambda:us-east-1:111111111111:function:resolve"
+
     monkeypatch.setattr(handlers.deployment, "resolve", fake_resolve)
-    out = handlers.resolve_handler(EVENT, None)
+    out = handlers.resolve_handler(EVENT, Ctx())
     assert out["status"] == "RESOLVED" and Deployment.from_dict(out["deployment"]).repo == "orders-svc"
-    assert seen == {"detail": EVENT["detail"], "allow": set()}
+    assert seen == {"detail": EVENT["detail"], "allow": set(), "account_id": "111111111111"}
     json.dumps(out)  # must be JSON-serialisable for Step Functions
 
 
@@ -159,20 +162,29 @@ def test_publish_update_calls_update_then_comment():
     jira = FakeJira()
     plan = TicketPlan("update", summary="s", description="d", comment="c", priority_severity="HIGH")
     assert handlers.publish(plan, {"key": "ORD-9", "description": "old"}, jira, CFG, "ORD", "orders-svc") == "ORD-9"
-    assert jira.calls == ["update_issue", "add_comment"] and jira.args == {"key": "ORD-9", "priority": "High"}
+    # Comment first: if the step fails in between and retries, the comment is repeated rather than lost.
+    assert jira.calls == ["add_comment", "update_issue"] and jira.args == {"key": "ORD-9", "priority": "High"}
 
 
 def test_publish_close():
     jira = FakeJira()
-    handlers.publish(TicketPlan("close", comment="c"), {"key": "ORD-9", "description": ""}, jira, CFG, "ORD", "orders-svc")
-    assert jira.calls == ["add_comment", "transition"] and jira.args["transition"] == "Done"
+    plan = TicketPlan("close", summary="s", description="resolved", comment="c")
+    handlers.publish(plan, {"key": "ORD-9", "description": ""}, jira, CFG, "ORD", "orders-svc")
+    assert jira.calls == ["add_comment", "update_issue", "transition"] and jira.args["transition"] == "Done"
+    assert jira.args["priority"] is None
+
+
+def test_publish_close_retry_only_transitions():
+    jira = FakeJira()
+    handlers.publish(TicketPlan("close"), {"key": "ORD-9", "description": ""}, jira, CFG, "ORD", "orders-svc")
+    assert jira.calls == ["transition"]
 
 
 def test_publish_close_without_transition():
     jira = FakeJira(transition_ok=False)
     assert handlers.publish(TicketPlan("close", comment="c"), {"key": "ORD-9", "description": ""}, jira, CFG,
                             "ORD", "orders-svc") == "ORD-9"
-    assert jira.calls == ["add_comment", "transition"]
+    assert jira.calls == ["add_comment", "transition"]  # no exception when the workflow has no such transition
 
 
 def test_publish_none():

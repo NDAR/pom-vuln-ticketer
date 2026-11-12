@@ -4,7 +4,7 @@ from __future__ import annotations
 from . import versions as V
 from .maven_repo import BootBom, MavenRepo, MavenRepoUnavailable
 from .models import Deployment, Finding, Report, Suggestion
-from .pom import BOOT_BOM, BOOT_GROUP, BOOT_PARENT, Project
+from .pom import BOOT_BOM, BOOT_GROUP, BOOT_PARENT, Project, resolve_value
 
 UNKNOWN_GROUP = "UNKNOWN"
 NOTE_TRANSITIVE = "Transitive dependency; pinned via dependencyManagement."
@@ -30,9 +30,9 @@ def select_target(installed: str, fixed: list[str], published: list[str] | None)
     candidate = (same_minor or same_major or candidates)[0]
     if published is None:
         return candidate, False
-    wanted = V.flavour(installed)
+    wanted = V.flavour_family(installed)
     for p in V.sort_versions(published):
-        if (not V.is_prerelease(p) and V.flavour(p) == wanted and V.major(p) == V.major(candidate)
+        if (not V.is_prerelease(p) and V.flavour_family(p) == wanted and V.major(p) == V.major(candidate)
                 and V.compare(_base(p), _base(candidate)) >= 0):
             return p, True
     return candidate, False
@@ -79,6 +79,13 @@ def classify(group: str | None, artifact: str, installed: str, target: str,
         return suggestion("pin", root_path, "dependencyManagement",
                           _pin_xml(group or UNKNOWN_GROUP, artifact, target), note=note)
 
+    def already_fixed(declared: str, where: str) -> Suggestion:
+        # Changing that declaration would be a downgrade or a no-op: the vulnerable jar is not the declared one.
+        return pin(f"{where} already sets {artifact} to {declared}, which is not affected, so the {installed} jar "
+                   "in the image comes from somewhere else (another module, a bundled or shaded jar, or an agent). "
+                   "A pin is shown in case it is a transitive version conflict; check where the jar comes from "
+                   "before applying it.")
+
     if group is None:
         return pin(f"The group of {artifact} could not be determined; replace {UNKNOWN_GROUP} with its groupId. "
                    + NOTE_TRANSITIVE)
@@ -89,6 +96,8 @@ def classify(group: str | None, artifact: str, installed: str, target: str,
         if not hit:
             continue
         pom, dep = hit
+        if dep.version and V.compare(dep.version, target) >= 0:
+            return already_fixed(dep.version, pom.path)
         if dep.property:
             owner = project.property_owner(dep.property)
             if owner:
@@ -103,8 +112,18 @@ def classify(group: str | None, artifact: str, installed: str, target: str,
     entry = boot_managed.get((group, artifact))
     if entry and boot and boot_bom:
         boot_version, is_parent = boot
-        upgrade = boot_bom.lowest_boot_managing(group, artifact, target, boot_version)
         override = boot_bom.override_value(entry, group, artifact, target) if is_parent else None
+        owner = project.property_owner(entry.property) if is_parent and entry.property else None
+        if owner:
+            # The project overrides Boot's version property, so upgrading Boot would change nothing.
+            declared, _ = resolve_value(f"${{{entry.property}}}", owner.properties)
+            wanted = override or target
+            if declared and V.compare(declared, wanted) >= 0:
+                return already_fixed(declared, f"Property {entry.property} in {owner.path}")
+            return suggestion("property", owner.path, "properties", f"<{entry.property}>{wanted}</{entry.property}>")
+        if V.compare(entry.version, target) >= 0:
+            return already_fixed(entry.version, f"Spring Boot {boot_version}")
+        upgrade = boot_bom.lowest_boot_managing(group, artifact, target, boot_version)
         if upgrade:
             return suggestion("boot", root_path, "parent" if is_parent else "dependencyManagement",
                               _boot_xml(upgrade, is_parent), boot_upgrade=upgrade,
@@ -132,7 +151,10 @@ def _analyze(deployment: Deployment, findings: list[Finding], project: Project |
     suggestions: list[Suggestion] = []
     no_fix: list[Finding] = []
     for (group, artifact), members in groups.items():
-        published = None if repo is None else (repo.versions(group, artifact) if group else [])
+        try:
+            published = None if repo is None else (repo.versions(group, artifact) if group else [])
+        except MavenRepoUnavailable:
+            published = None
         fixable: list[tuple[Finding, str, bool]] = []
         for finding in members:
             target, verified = select_target(finding.version, finding.fixed_versions, published)
@@ -144,9 +166,13 @@ def _analyze(deployment: Deployment, findings: list[Finding], project: Project |
             continue
         installed = V.sort_versions({finding.version for finding, _, _ in fixable})
         target = V.sort_versions(t for _, t, _ in fixable)[-1]
-        suggestion = classify(group, artifact, installed[0], target, project, boot_bom)
+        try:
+            suggestion = classify(group, artifact, installed[0], target, project, boot_bom if published is not None else None)
+        except MavenRepoUnavailable:
+            suggestion = classify(group, artifact, installed[0], target, project, None)
+            published = None
         suggestion.current = installed
-        suggestion.verified = all(verified for _, _, verified in fixable)
+        suggestion.verified = published is not None and all(verified for _, _, verified in fixable)
         suggestion.cves = sorted({(finding.cve, finding.severity) for finding, _, _ in fixable},
                                  key=lambda c: (_severity_rank(c[1]), c[0]))
         suggestions.append(suggestion)
@@ -170,8 +196,8 @@ def _analyze(deployment: Deployment, findings: list[Finding], project: Project |
 
 
 def analyze(deployment: Deployment, findings: list[Finding], project: Project | None, repo: MavenRepo) -> Report:
-    """Turn Inspector findings into POM suggestions, rolled up per artifact."""
-    try:
-        return _analyze(deployment, findings, project, repo)
-    except MavenRepoUnavailable:
-        return _analyze(deployment, findings, project, None)
+    """Turn Inspector findings into POM suggestions, rolled up per artifact.
+
+    A failed repository lookup degrades only the artifact it was for: that suggestion is marked unverified.
+    """
+    return _analyze(deployment, findings, project, repo)
