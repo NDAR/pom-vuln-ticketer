@@ -1,0 +1,31 @@
+{
+  "awsAccountId": "111111111111",
+  "findingArn": "arn:aws:inspector2:us-east-1:111111111111:finding/0002",
+  "type": "PACKAGE_VULNERABILITY",
+  "severity": "CRITICAL",
+  "status": "ACTIVE",
+  "title": "CVE-2024-5535 - openssl",
+  "description": "Issue summary: Calling the OpenSSL API function SSL_select_next_proto with an empty buffer.",
+  "packageVulnerabilityDetails": {
+    "vulnerabilityId": "CVE-2024-5535",
+    "source": "DEBIAN_CVE",
+    "vulnerablePackages": [
+      {
+        "name": "openssl",
+        "version": "3.0.11",
+        "epoch": 0,
+        "release": "1~deb12u2",
+        "arch": "ARM64",
+        "packageManager": "OS",
+        "fixedInVersion": "0:3.0.14-1~deb12u1"
+      }
+    ]
+  },
+  "resources": [
+    {
+      "type": "AWS_ECR_CONTAINER_IMAGE",
+      "id": "arn:aws:ecr:us-east-1:111111111111:repository/orders-svc/sha256:aaa",
+      "details": {"awsEcrContainerImage": {"repositoryName": "orders-svc", "imageHash": "sha256:aaa", "imageTags": ["abc123d"]}}
+    }
+  ]
+}

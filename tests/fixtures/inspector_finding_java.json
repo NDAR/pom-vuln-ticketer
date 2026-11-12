@@ -1,0 +1,31 @@
+{
+  "awsAccountId": "111111111111",
+  "findingArn": "arn:aws:inspector2:us-east-1:111111111111:finding/0001",
+  "type": "PACKAGE_VULNERABILITY",
+  "severity": "HIGH",
+  "status": "ACTIVE",
+  "title": "CVE-2023-35116 - com.fasterxml.jackson.core:jackson-databind",
+  "description": "jackson-databind through 2.15.2 allows attackers to cause a denial of service.",
+  "packageVulnerabilityDetails": {
+    "vulnerabilityId": "CVE-2023-35116",
+    "source": "NVD",
+    "vulnerablePackages": [
+      {
+        "name": "com.fasterxml.jackson.core:jackson-databind",
+        "version": "2.15.2",
+        "epoch": 0,
+        "packageManager": "JAR",
+        "filePath": "app.jar/BOOT-INF/lib/jackson-databind-2.15.2.jar",
+        "fixedInVersion": "2.15.4",
+        "remediation": "Update jackson-databind to 2.15.4"
+      }
+    ]
+  },
+  "resources": [
+    {
+      "type": "AWS_ECR_CONTAINER_IMAGE",
+      "id": "arn:aws:ecr:us-east-1:111111111111:repository/orders-svc/sha256:aaa",
+      "details": {"awsEcrContainerImage": {"repositoryName": "orders-svc", "imageHash": "sha256:aaa", "imageTags": ["abc123d"]}}
+    }
+  ]
+}

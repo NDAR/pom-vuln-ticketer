@@ -1,0 +1,8 @@
+{
+  "accountId": "111111111111",
+  "resourceId": "arn:aws:ecr:us-east-1:111111111111:repository/orders-svc/sha256:aaa",
+  "resourceType": "AWS_ECR_CONTAINER_IMAGE",
+  "scanType": "PACKAGE",
+  "scanStatus": {"statusCode": "ACTIVE", "reason": "SUCCESSFUL"},
+  "resourceMetadata": {"ecrImage": {"tags": ["abc123d"]}}
+}
