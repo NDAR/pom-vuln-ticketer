@@ -32,6 +32,7 @@ Success means:
 | JIRA project | Per-repo mapping in config, with an optional default |
 | JIRA network | Private; the publishing Lambda runs in the VPC |
 | Suggestion logic | Rule-based POM analysis, verified against Maven Central (no LLM) |
+| Severity | Only CRITICAL and HIGH findings are handled; everything else is ignored |
 | Spring Boot | `spring-boot-starter-parent` is the parent in all repos; imported BOM also handled |
 | Stack | Python 3.12, AWS SAM, Step Functions; same conventions as `codecommit-pr` |
 
@@ -42,6 +43,8 @@ Success means:
 - Running Maven to compute exact transitive dependency paths.
 - Reacting to Inspector's continuous rescans between deployments.
 - LLM-written explanations.
+- MEDIUM, LOW, INFORMATIONAL and UNTRIAGED findings. They are not listed,
+  counted, or used to keep a ticket open.
 
 ## Architecture
 
@@ -103,7 +106,8 @@ See "JIRA publishing" below. This is the only function attached to the VPC.
 ### Inputs
 
 - `inspector2:ListFindings` filtered by image digest, status `ACTIVE`, type
-  `PACKAGE_VULNERABILITY`. For each vulnerable package: name, installed
+  `PACKAGE_VULNERABILITY`, severity `CRITICAL` or `HIGH` (filtered in the API
+  call). "Findings" everywhere in this document means these findings only. For each vulnerable package: name, installed
   version, `fixedInVersion`, package manager, file path, plus CVE ID, severity
   and title from the finding.
 - A finding is a **Java finding** when its package manager is a Java one
@@ -204,10 +208,13 @@ If more than one matches, the newest is used and a warning is logged.
 | Yes | None | Comment "All findings resolved as of `<commit>`", then transition |
 | No | None | Do nothing |
 
+"None" means no CRITICAL or HIGH findings remain, so a ticket closes even if
+lower-severity findings still exist on the image.
+
 - **Summary:** `[<repo>] Dependency vulnerabilities: N findings (X critical, Y high)`.
 - **Issue type:** configurable, default `Task`.
 - **Priority:** mapped from the highest severity (configurable map; default
-  Critical→Highest, High→High, Medium→Medium, else Low).
+  Critical→Highest, High→High).
 - **Labels:** `pom-vuln-bot`, `repo-<repo>`.
 - **Change comment:** `Deploy <short commit> via <pipeline>: 2 resolved, 1 new, 6 unchanged`
   followed by the new and resolved finding keys.
@@ -227,13 +234,13 @@ If more than one matches, the newest is used and a warning is logged.
    was classified, CVEs with severity, POM file and section, and a
    `{code:xml}` snippet.
 4. **No fix available yet** — artifact, version, CVEs.
-5. **Not fixable in the POM** — counts by severity of non-Java findings (OS
+5. **Not fixable in the POM** — counts of critical and high non-Java findings (OS
    packages and similar) and the top five CVEs with package names.
 6. The finding-key block.
 
-If the description would exceed JIRA's field limit (32,767 characters), low
-and medium findings are collapsed to one line each, then truncated with a
-count of omitted items.
+If the description would exceed JIRA's field limit (32,767 characters), high
+findings are collapsed to one line each (critical ones keep their snippets),
+then the list is truncated with a count of omitted items.
 
 ## Configuration
 
@@ -249,8 +256,7 @@ SSM parameter (JSON):
   "defaultProject": "PLAT",
   "issueType": "Task",
   "doneTransition": "Done",
-  "priorityMap": {"CRITICAL": "Highest", "HIGH": "High", "MEDIUM": "Medium"},
-  "minSeverity": "LOW",
+  "priorityMap": {"CRITICAL": "Highest", "HIGH": "High"},
   "repos": {
     "orders-svc": {"jiraProject": "ORD", "pomPath": "pom.xml"}
   }
@@ -258,7 +264,8 @@ SSM parameter (JSON):
 ```
 
 A repo that is not listed uses `defaultProject`; if there is no default, the
-run is skipped with a log line. `minSeverity` drops findings below that level.
+run is skipped with a log line. The severity filter (CRITICAL and HIGH) is
+fixed in code, not configurable.
 
 ## Error handling
 
