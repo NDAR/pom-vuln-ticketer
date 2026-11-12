@@ -94,8 +94,8 @@ untouched.
 ### 3. Analyze
 
 See "POM analyzer" below. Output is a JSON `Report` (findings, suggestions,
-headline, non-POM findings). If the report is larger than the Step Functions
-payload limit it is written to an S3 bucket and passed by reference.
+headline, non-POM findings). The report is written to an S3 bucket and passed
+by reference, because it can exceed the Step Functions payload limit.
 
 ### 4. PublishJira
 
@@ -292,7 +292,8 @@ pom-vuln-ticketer/
     deployment.py             pipeline execution → repo, commit, images
     inspector.py              coverage check and findings → Finding objects
     pom.py                    POM parsing and property resolution
-    maven_repo.py             repository client, BOM resolution, version comparison
+    versions.py               Maven version comparison
+    maven_repo.py             repository client, BOM resolution
     analyzer.py               classification, target selection, roll-up → Report
     ticket.py                 rendering, finding keys, diff against existing ticket
     jira.py                   JIRA REST client
@@ -310,7 +311,8 @@ Each module has one job and is testable alone: `analyzer.py` takes plain
 
 - ResolveDeployment: `codepipeline:GetPipelineExecution`,
   `codepipeline:ListActionExecutions`, `codepipeline:GetPipeline`,
-  `ecs:DescribeServices`, `ecs:DescribeTaskDefinition`, `ecr:DescribeImages`.
+  `ecs:DescribeServices`, `ecs:DescribeTaskDefinition`, `ecr:DescribeImages`,
+  `codedeploy:GetDeploymentGroup` (blue/green pipelines), `ssm:GetParameter`.
 - WaitForScan: `inspector2:ListCoverage`.
 - Analyze: `inspector2:ListFindings`, `codecommit:GetFile`,
   `ssm:GetParameter`, S3 put on the report bucket.
