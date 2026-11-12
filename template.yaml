@@ -1,0 +1,220 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Creates or refreshes one JIRA ticket per repo with POM upgrades for critical and high Inspector findings after each ECS deployment.
+
+Parameters:
+  JiraBaseUrl:
+    Type: String
+    Description: Base URL of JIRA Data Center, for example https://jira.example.internal
+    AllowedPattern: "https?://.+"
+  JiraTokenSecretArn:
+    Type: String
+    Description: ARN of the Secrets Manager secret holding the JIRA personal access token as a plain string.
+  ConfigParameterName:
+    Type: String
+    Default: /pom-vuln-ticketer/config
+    Description: SSM parameter holding the JSON configuration (repo to JIRA project mapping). Must start with "/".
+    AllowedPattern: "/.+"
+  VpcSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets that can reach JIRA. They need NAT or VPC endpoints for Secrets Manager, SSM and S3.
+  VpcSecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: Security groups for the JIRA publishing function.
+  MavenRepoUrl:
+    Type: String
+    Default: https://repo1.maven.org/maven2
+    Description: Maven repository used to verify versions. Point at an internal mirror if you have one.
+  PipelineAllowList:
+    Type: String
+    Default: ""
+    Description: Comma-separated pipeline names to handle. Empty = every pipeline in this account and region.
+  AlarmTopicArn:
+    Type: String
+    Default: ""
+    Description: Optional SNS topic notified when a workflow execution fails.
+  ScanWaitSeconds:
+    Type: Number
+    Default: 120
+  ScanMaxAttempts:
+    Type: Number
+    Default: 15
+
+Conditions:
+  HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, ""]]
+
+Globals:
+  Function:
+    CodeUri: src/
+    Runtime: python3.12
+    Architectures: [arm64]
+    MemorySize: 512
+    Environment:
+      Variables:
+        CONFIG_PARAMETER: !Ref ConfigParameterName
+        PIPELINE_ALLOW_LIST: !Ref PipelineAllowList
+        MAVEN_REPO_URL: !Ref MavenRepoUrl
+        REPORT_BUCKET: !Ref ReportBucket
+
+Resources:
+  ReportBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireReports
+            Status: Enabled
+            ExpirationInDays: 30
+
+  ResolveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: vuln_ticketer.handlers.resolve_handler
+      Timeout: 60
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - codepipeline:GetPipelineExecution
+                - codepipeline:ListActionExecutions
+                - codepipeline:GetPipeline
+              Resource: !Sub arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:*
+            - Effect: Allow
+              Action:
+                - ecs:DescribeServices
+                - ecs:DescribeTaskDefinition
+                - codedeploy:GetDeploymentGroup
+              Resource: "*"
+            - Effect: Allow
+              Action: ecr:DescribeImages
+              Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/*
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ConfigParameterName}
+
+  WaitFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: vuln_ticketer.handlers.wait_handler
+      Timeout: 30
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: inspector2:ListCoverage
+              Resource: "*"
+
+  AnalyzeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: vuln_ticketer.handlers.analyze_handler
+      Timeout: 300
+      MemorySize: 1024
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: inspector2:ListFindings
+              Resource: "*"
+            - Effect: Allow
+              Action: codecommit:GetFile
+              Resource: !Sub arn:${AWS::Partition}:codecommit:${AWS::Region}:${AWS::AccountId}:*
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ConfigParameterName}
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub ${ReportBucket.Arn}/reports/*
+
+  PublishFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: vuln_ticketer.handlers.publish_handler
+      Timeout: 60
+      ReservedConcurrentExecutions: 1  # one publisher at a time, so two deploys cannot both create a ticket
+      VpcConfig:
+        SubnetIds: !Ref VpcSubnetIds
+        SecurityGroupIds: !Ref VpcSecurityGroupIds
+      Environment:
+        Variables:
+          JIRA_BASE_URL: !Ref JiraBaseUrl
+          JIRA_TOKEN_SECRET_ARN: !Ref JiraTokenSecretArn
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref JiraTokenSecretArn
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ConfigParameterName}
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub ${ReportBucket.Arn}/reports/*
+
+  Workflow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Type: STANDARD
+      DefinitionUri: statemachine/workflow.asl.json
+      DefinitionSubstitutions:
+        ResolveFunctionArn: !GetAtt ResolveFunction.Arn
+        WaitFunctionArn: !GetAtt WaitFunction.Arn
+        AnalyzeFunctionArn: !GetAtt AnalyzeFunction.Arn
+        PublishFunctionArn: !GetAtt PublishFunction.Arn
+        ScanWaitSeconds: !Ref ScanWaitSeconds
+        ScanMaxAttempts: !Ref ScanMaxAttempts
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ResolveFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref WaitFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref AnalyzeFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref PublishFunction
+        - Statement:
+            - Effect: Allow
+              Action: cloudwatch:PutMetricData
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  cloudwatch:namespace: PomVulnTicketer
+      Events:
+        PipelineSucceeded:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source: [aws.codepipeline]
+              detail-type: [CodePipeline Pipeline Execution State Change]
+              detail:
+                state: [SUCCEEDED]
+
+  WorkflowFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: pom-vuln-ticketer workflow execution failed
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Ref Workflow
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+
+Outputs:
+  StateMachineArn:
+    Value: !Ref Workflow
+  ReportBucketName:
+    Value: !Ref ReportBucket

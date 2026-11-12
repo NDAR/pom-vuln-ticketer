@@ -1,0 +1,117 @@
+{
+  "Comment": "After a successful pipeline deployment: resolve what was deployed, wait for the Inspector scan, analyze, publish to JIRA.",
+  "StartAt": "Resolve",
+  "States": {
+    "Resolve": {
+      "Type": "Task",
+      "Resource": "${ResolveFunctionArn}",
+      "ResultPath": "$.resolve",
+      "Retry": [
+        {"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2}
+      ],
+      "Next": "Resolved?"
+    },
+    "Resolved?": {
+      "Type": "Choice",
+      "Choices": [
+        {"Variable": "$.resolve.status", "StringEquals": "SKIPPED", "Next": "Skipped"}
+      ],
+      "Default": "InitAttempts"
+    },
+    "Skipped": {
+      "Type": "Succeed",
+      "Comment": "SKIPPED"
+    },
+    "InitAttempts": {
+      "Type": "Pass",
+      "Parameters": {
+        "attempt": 0,
+        "waitSeconds.$": "States.StringToJson('${ScanWaitSeconds}')",
+        "maxAttempts.$": "States.StringToJson('${ScanMaxAttempts}')"
+      },
+      "ResultPath": "$.loop",
+      "Next": "CheckScan"
+    },
+    "CheckScan": {
+      "Type": "Task",
+      "Resource": "${WaitFunctionArn}",
+      "Parameters": {"deployment.$": "$.resolve.deployment"},
+      "ResultPath": "$.scan",
+      "Retry": [
+        {"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2}
+      ],
+      "Next": "ScanReady?"
+    },
+    "ScanReady?": {
+      "Type": "Choice",
+      "Choices": [
+        {"Variable": "$.scan.ready", "BooleanEquals": true, "Next": "Analyze"},
+        {"Variable": "$.loop.attempt", "NumericGreaterThanEqualsPath": "$.loop.maxAttempts", "Next": "RecordScanTimeout"}
+      ],
+      "Default": "WaitForScan"
+    },
+    "WaitForScan": {
+      "Type": "Wait",
+      "SecondsPath": "$.loop.waitSeconds",
+      "Next": "Increment"
+    },
+    "Increment": {
+      "Type": "Pass",
+      "Parameters": {
+        "attempt.$": "States.MathAdd($.loop.attempt, 1)",
+        "waitSeconds.$": "$.loop.waitSeconds",
+        "maxAttempts.$": "$.loop.maxAttempts"
+      },
+      "ResultPath": "$.loop",
+      "Next": "CheckScan"
+    },
+    "RecordScanTimeout": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:cloudwatch:putMetricData",
+      "Parameters": {
+        "Namespace": "PomVulnTicketer",
+        "MetricData": [
+          {
+            "MetricName": "ScanTimeout",
+            "Value": 1,
+            "Unit": "Count",
+            "Dimensions": [{"Name": "Pipeline", "Value.$": "$.detail.pipeline"}]
+          }
+        ]
+      },
+      "ResultPath": null,
+      "Catch": [
+        {"ErrorEquals": ["States.ALL"], "ResultPath": null, "Next": "ScanTimeout"}
+      ],
+      "Next": "ScanTimeout"
+    },
+    "ScanTimeout": {
+      "Type": "Succeed",
+      "Comment": "SKIPPED_SCAN_TIMEOUT"
+    },
+    "Analyze": {
+      "Type": "Task",
+      "Resource": "${AnalyzeFunctionArn}",
+      "Parameters": {"deployment.$": "$.resolve.deployment"},
+      "ResultPath": "$.analyze",
+      "Retry": [
+        {"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2}
+      ],
+      "Next": "Publish"
+    },
+    "Publish": {
+      "Type": "Task",
+      "Resource": "${PublishFunctionArn}",
+      "Parameters": {"reportRef.$": "$.analyze.reportRef"},
+      "ResultPath": "$.publish",
+      "Retry": [
+        {"ErrorEquals": ["JiraError"], "MaxAttempts": 0},
+        {"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2}
+      ],
+      "Next": "Done"
+    },
+    "Done": {
+      "Type": "Succeed"
+    }
+  }
+}
