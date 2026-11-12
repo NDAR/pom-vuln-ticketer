@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from . import versions as V
-from .maven_repo import BootBom
-from .models import Suggestion
+from .maven_repo import BootBom, MavenRepo, MavenRepoUnavailable
+from .models import Deployment, Finding, Report, Suggestion
 from .pom import BOOT_BOM, BOOT_GROUP, BOOT_PARENT, Project
 
 UNKNOWN_GROUP = "UNKNOWN"
@@ -114,3 +114,64 @@ def classify(group: str | None, artifact: str, installed: str, target: str,
 
     # Case 4: transitive or unmanaged.
     return pin(NOTE_TRANSITIVE)
+
+
+def _severity_rank(severity: str) -> int:
+    return 0 if severity == "CRITICAL" else 1
+
+
+def _analyze(deployment: Deployment, findings: list[Finding], project: Project | None,
+             repo: MavenRepo | None) -> Report:
+    """repo=None means the Maven repository is unavailable: nothing is verified, Boot is not consulted."""
+    boot_bom = BootBom(repo) if repo else None
+    groups: dict[tuple[str | None, str], list[Finding]] = {}
+    for finding in findings:
+        if finding.is_java:
+            groups.setdefault((finding.group, finding.artifact), []).append(finding)
+
+    suggestions: list[Suggestion] = []
+    no_fix: list[Finding] = []
+    for (group, artifact), members in groups.items():
+        published = None if repo is None else (repo.versions(group, artifact) if group else [])
+        fixable: list[tuple[Finding, str, bool]] = []
+        for finding in members:
+            target, verified = select_target(finding.version, finding.fixed_versions, published)
+            if target is None:
+                no_fix.append(finding)
+            else:
+                fixable.append((finding, target, verified))
+        if not fixable:
+            continue
+        installed = V.sort_versions({finding.version for finding, _, _ in fixable})
+        target = V.sort_versions(t for _, t, _ in fixable)[-1]
+        suggestion = classify(group, artifact, installed[0], target, project, boot_bom)
+        suggestion.current = installed
+        suggestion.verified = all(verified for _, _, verified in fixable)
+        suggestion.cves = sorted({(finding.cve, finding.severity) for finding, _, _ in fixable},
+                                 key=lambda c: (_severity_rank(c[1]), c[0]))
+        suggestions.append(suggestion)
+
+    suggestions.sort(key=lambda s: (s.kind != "boot", min(_severity_rank(sev) for _, sev in s.cves), s.artifact))
+    report = Report(deployment=deployment, suggestions=suggestions, no_fix=no_fix,
+                    non_pom=[finding for finding in findings if not finding.is_java], headline=None,
+                    finding_keys=sorted(finding.key for finding in findings), pom_missing=project is None)
+
+    upgrades = [s for s in suggestions if s.kind == "boot" and s.boot_upgrade]
+    boot = project.boot() if project else None
+    if len(upgrades) >= 2 and boot:
+        boot_version, is_parent = boot
+        newest = V.sort_versions(s.boot_upgrade for s in upgrades)[-1]
+        for s in upgrades:
+            s.boot_upgrade, s.snippet = newest, _boot_xml(newest, is_parent)
+        resolved = sum(len(s.cves) for s in upgrades)
+        report.headline = (f"Upgrading {BOOT_PARENT if is_parent else BOOT_BOM} {boot_version} → {newest} "
+                           f"resolves {resolved} of {report.counts()['total']} findings.")
+    return report
+
+
+def analyze(deployment: Deployment, findings: list[Finding], project: Project | None, repo: MavenRepo) -> Report:
+    """Turn Inspector findings into POM suggestions, rolled up per artifact."""
+    try:
+        return _analyze(deployment, findings, project, repo)
+    except MavenRepoUnavailable:
+        return _analyze(deployment, findings, project, None)

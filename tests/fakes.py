@@ -137,3 +137,32 @@ class FakeRepo:
                 return served.get(path)
 
         return _Repo()
+
+
+# --- Model builders ------------------------------------------------------------
+
+def make_deployment(**over):
+    from vuln_ticketer.models import Deployment, Image
+
+    base = dict(repo="orders-svc", branch="main", commit="abc123def4567890", pipeline="orders-pipeline",
+                execution_id="exec-1",
+                images=[Image("orders", "orders-svc", "sha256:" + "a" * 64,
+                              "111111111111.dkr.ecr.us-east-1.amazonaws.com/orders-svc:abc123d")])
+    base.update(over)
+    return Deployment(**base)
+
+
+def java_finding(coords, version, fixed, cve, severity="HIGH", services=("orders",)):
+    from vuln_ticketer.models import Finding
+
+    group, artifact = coords
+    return Finding(group=group, artifact=artifact, version=version, fixed_versions=list(fixed), cve=cve,
+                   severity=severity, title=f"{cve} - {artifact}", is_java=True,
+                   file_path=f"app.jar/BOOT-INF/lib/{artifact}-{version}.jar", services=list(services))
+
+
+def os_finding(name, cve, severity="HIGH", version="3.0.11"):
+    from vuln_ticketer.models import Finding
+
+    return Finding(group=None, artifact=name, version=version, fixed_versions=["3.0.14"], cve=cve,
+                   severity=severity, title=f"{cve} - {name}", is_java=False, file_path="", services=["orders"])
